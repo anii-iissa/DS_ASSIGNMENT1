@@ -31,6 +31,7 @@ Example:
 
 Bash
 ./qSim 100 4 60 2.3  # 100 customers, 4 tellers, 60 min sim, 2.3 min avg service [cite: 70, 71, 72]
+
 3. Test Cases and Output Analysis
 
 Three test cases were executed to compare the two queuing regimes.
