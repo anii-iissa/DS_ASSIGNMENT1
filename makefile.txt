@@ -1,0 +1,26 @@
+makefile
+# Compiler
+CC = gcc
+
+# Compiler flags
+# -Wall: enables all compiler's warning messages
+# -g: adds debugging information to the executable file
+# -lm: links the math library
+CFLAGS = -Wall -g -lm
+
+# The name of the executable file
+TARGET = qSim
+
+# The name of the source file
+SRCS = src.c
+
+# The default rule that is executed when you run "make"
+all: $(TARGET)
+
+# Rule to link the object file into the final executable
+$(TARGET): $(SRCS)
+	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS)
+
+# Rule to remove the executable and any other generated files
+clean:
+	rm -f $(TARGET)
