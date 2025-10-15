@@ -2,46 +2,50 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <math.h> // For standard deviation, linking with -lm required in makefile
+#include <math.h>
 
-// --- Symbolic Constants [cite: 26] ---
-#define MAX_TELLER_IDLE_SECONDS_SHORT 150.0 
-#define MAX_TELLER_IDLE_SECONDS_LONG 600.0 // Initial idle time [cite: 25]
+#define MAX_TELLER_IDLE_SECONDS_SHORT 150.0
+#define MAX_TELLER_IDLE_MINUTES_SHORT (MAX_TELLER_IDLE_SECONDS_SHORT / 60.0)
+#define MAX_TELLER_IDLE_SECONDS_LONG 600.0
+#define MAX_TELLER_IDLE_MINUTES_LONG (MAX_TELLER_IDLE_SECONDS_LONG / 60.0)
 
-// --- Global Simulation Parameters ---
 int NUM_CUSTOMERS = 0;
 int NUM_TELLERS = 0;
 float SIM_TIME_MINUTES = 0.0;
 float AVG_SERVICE_TIME_MINUTES = 0.0;
 
-// --- Simulated Clock ---
-float CURRENT_TIME = 0.0; // Current time in minutes
+float CURRENT_TIME = 0.0;
 
-// --- Enums and Typedefs ---
+int customers_served = 0;
+float total_wait_time = 0.0;
+float total_service_time = 0.0;
+float total_time_in_bank = 0.0;
+int single_queue_mode_flag = 0;
+
 typedef enum {
-    ARRIVAL,      // Customer arriving [cite: 39]
-    SERVICE_END,  // Customer service completed [cite: 41, 46]
-    TELLER_ACTION // Teller completed service/idle time [cite: 43, 47]
+    ARRIVAL,
+    SERVICE_END,
+    TELLER_ACTION
 } EventType;
 
-// Forward declarations of core structures
 struct Customer;
 struct Teller;
 struct Event;
 
-// --- Function Pointer Type for Event Action [cite: 53, 54] ---
 typedef void (*ActionFunction)(struct Event*);
 
-// --- 1. Customer Structure [cite: 23] ---
 typedef struct Customer {
     int id;
     float arrival_time;
     float start_service_time;
     float departure_time;
-    struct Customer *next; // For teller queue linked list
+    struct Customer *next;
 } Customer;
 
-// --- 2. Teller Queue Structure [cite: 56, 57] ---
+typedef struct Teller {
+    int id;
+} Teller;
+
 typedef struct TellerQueue {
     int id;
     Customer *head;
@@ -49,44 +53,42 @@ typedef struct TellerQueue {
     int length;
 } TellerQueue;
 
-// Global array of teller queues
 TellerQueue *TellerLines = NULL;
+Teller *Tellers = NULL;
 
-// --- 3. Event Structure [cite: 27, 49, 50] ---
 typedef struct Event {
     EventType type;
-    float time; // Time of the event [cite: 29]
-    ActionFunction action; // Function pointer to the action to invoke [cite: 53, 54]
-    void *actor_data; // Pointer to a Customer or Teller structure
-    struct Event *next; // For event queue linked list
+    float time;
+    ActionFunction action;
+    void *actor_data;
+    struct Event *next;
 } Event;
 
-// Global Event Queue [cite: 27, 60]
 Event *EventQueueHead = NULL;
 
-
-// --- Function Prototypes for Actions (Called via Function Pointer) ---
 void handle_customer_arrival(Event *e);
 void handle_service_end(Event *e);
 void handle_teller_action(Event *e);
 
-// --- Linked List Helper Function Prototypes (e.g., for EventQueue) ---
-void insert_event_sorted(Event *newEvent); // [cite: 61, 62]
-Event* remove_event_head(); // [cite: 33, 63]
+void insert_event_sorted(Event *newEvent);
+Event* remove_event_head();
+void free_all_remaining_events();
 
-// --- Utility Functions ---
-// Generates a random time in [0, SIM_TIME_MINUTES] [cite: 75, 76]
+void enqueue_customer(TellerQueue *line, Customer *c);
+Customer* dequeue_customer(TellerQueue *line);
+Customer* steal_customer(TellerQueue *except_line);
+void free_all_teller_queues();
+
 float generate_arrival_time() {
     return SIM_TIME_MINUTES * rand() / (float)RAND_MAX;
 }
 
-// Generates a random service time [cite: 78, 79]
 float generate_service_time() {
     return 2.0 * AVG_SERVICE_TIME_MINUTES * rand() / (float)RAND_MAX;
 }
 
-// Selects the shortest teller line [cite: 14, 40]
 TellerQueue* get_shortest_line() {
+    if (NUM_TELLERS == 0) return NULL;
     TellerQueue *shortest = &TellerLines[0];
     int shortest_len = shortest->length;
 
@@ -95,7 +97,6 @@ TellerQueue* get_shortest_line() {
             shortest = &TellerLines[i];
             shortest_len = shortest->length;
         } else if (TellerLines[i].length == shortest_len) {
-            // Randomly choose among equally short lines [cite: 14, 40]
             if (rand() % 2 == 0) {
                 shortest = &TellerLines[i];
             }
@@ -104,57 +105,146 @@ TellerQueue* get_shortest_line() {
     return shortest;
 }
 
-// --- Event Action Implementations [cite: 55] ---
+void insert_event_sorted(Event *newEvent) {
+    if (EventQueueHead == NULL || newEvent->time < EventQueueHead->time) {
+        newEvent->next = EventQueueHead;
+        EventQueueHead = newEvent;
+        return;
+    }
 
-// Action: New customer arrives. Add to the shortest line.
-void handle_customer_arrival(Event *e) {
-    printf("Function Pointer Log: Invoking handle_customer_arrival() at time %.2f\n", CURRENT_TIME); // [cite: 64]
-    Customer *c = (Customer *)e->actor_data;
-    TellerQueue *line = get_shortest_line(); // Logic for separate lines [cite: 39]
+    Event *current = EventQueueHead;
+    while (current->next != NULL && current->next->time <= newEvent->time) {
+        current = current->next;
+    }
     
-    // Add customer to the end of the selected line [cite: 39, 57]
-    // ... logic to add 'c' to the linked list 'line' ...
-    line->length++;
-    
-    // Check if the teller is idle; if so, start service immediately.
-    // (A more robust solution checks teller *state*, but for simplicity,
-    // we assume the teller action event will handle initiating service.)
+    newEvent->next = current->next;
+    current->next = newEvent;
 }
 
-// Action: Customer service is completed. Collect stats and delete event.
+Event* remove_event_head() {
+    Event *head = EventQueueHead;
+    if (head != NULL) {
+        EventQueueHead = EventQueueHead->next;
+        head->next = NULL;
+    }
+    return head;
+}
+
+void free_all_remaining_events() {
+    Event *current = EventQueueHead;
+    while (current != NULL) {
+        Event *temp = current;
+        current = current->next;
+        free(temp);
+    }
+    EventQueueHead = NULL;
+}
+
+void enqueue_customer(TellerQueue *line, Customer *c) {
+    c->next = NULL;
+    if (line->head == NULL) {
+        line->head = c;
+        line->tail = c;
+    } else {
+        line->tail->next = c;
+        line->tail = c;
+    }
+    line->length++;
+}
+
+Customer* dequeue_customer(TellerQueue *line) {
+    Customer *c = line->head;
+    if (c != NULL) {
+        line->head = line->head->next;
+        if (line->head == NULL) {
+            line->tail = NULL;
+        }
+        c->next = NULL;
+        line->length--;
+    }
+    return c;
+}
+
+Customer* steal_customer(TellerQueue *except_line) {
+    if (single_queue_mode_flag) return NULL;
+
+    for (int i = 0; i < NUM_TELLERS; i++) {
+        TellerQueue *current_line = &TellerLines[i];
+        if (current_line != except_line && current_line->length > 0) {
+            return dequeue_customer(current_line);
+        }
+    }
+    return NULL;
+}
+
+void free_all_teller_queues() {
+    for (int i = 0; i < NUM_TELLERS; i++) {
+        TellerQueue *line = &TellerLines[i];
+        Customer *current = line->head;
+        while (current != NULL) {
+            Customer *temp = current;
+            current = current->next;
+            free(temp);
+        }
+        line->head = NULL;
+        line->tail = NULL;
+        line->length = 0;
+    }
+    if (TellerLines != NULL) {
+        free(TellerLines);
+        TellerLines = NULL;
+    }
+}
+
+void handle_customer_arrival(Event *e) {
+    printf("FP Log: Arrival C%d at %.2f\n", ((Customer *)e->actor_data)->id, CURRENT_TIME);
+    Customer *c = (Customer *)e->actor_data;
+    
+    TellerQueue *line = single_queue_mode_flag ? &TellerLines[0] : get_shortest_line();
+    
+    enqueue_customer(line, c);
+}
+
 void handle_service_end(Event *e) {
-    printf("Function Pointer Log: Invoking handle_service_end() at time %.2f\n", CURRENT_TIME); // [cite: 64]
     Customer *c = (Customer *)e->actor_data;
     c->departure_time = CURRENT_TIME;
     
-    // Gather statistics: total time in bank (departure - arrival) [cite: 41, 42]
-    float time_in_bank = c->departure_time - c->arrival_time;
-    // ... update global statistics (total time, count, max wait, etc.) ...
+    float wait_time = c->start_service_time - c->arrival_time;
+    float service_time = c->departure_time - c->start_service_time;
+    float time_in_bank = c->departure_time - c->start_service_time;
     
-    // Customer leaves the bank, Event object is deleted [cite: 42]
-    free(c); 
-    // The Event 'e' will be freed after this function returns in the main loop.
+    total_wait_time += wait_time;
+    total_service_time += service_time;
+    total_time_in_bank += time_in_bank;
+    customers_served++;
+    
+    printf("FP Log: Service End C%d at %.2f (Wait: %.2f, Total: %.2f)\n", 
+           c->id, CURRENT_TIME, wait_time, time_in_bank);
+
+    free(c);
 }
 
-// Action: Teller is ready to serve next customer (or idle).
 void handle_teller_action(Event *e) {
-    printf("Function Pointer Log: Invoking handle_teller_action() at time %.2f\n", CURRENT_TIME); // [cite: 64]
-    // Gather statistics about the teller (e.g., idle time) [cite: 43]
-    // ... update global teller statistics ...
+    Teller *t = (Teller *)e->actor_data;
+    printf("FP Log: Teller %d Action at %.2f\n", t->id, CURRENT_TIME);
 
-    int line_index_to_serve = -1; 
-    // Logic to find a customer:
-    // 1. Check if a customer is waiting in this teller's line.
-    // 2. If not, check other lines and "steal" the first customer from a random one.
-    
     Customer *customer_to_serve = NULL;
-    // ... logic to find customer_to_serve and set line_index_to_serve ...
+    int line_index_to_serve = t->id - 1;
 
-    if (customer_to_serve) { // Customer found [cite: 45]
+    TellerQueue *my_line = single_queue_mode_flag ? &TellerLines[0] : &TellerLines[line_index_to_serve];
+    customer_to_serve = dequeue_customer(my_line);
+
+    if (customer_to_serve == NULL && !single_queue_mode_flag) {
+        customer_to_serve = steal_customer(my_line);
+        if (customer_to_serve) {
+            printf("FP Log: Teller %d STOLE C%d\n", t->id, customer_to_serve->id);
+        }
+    }
+
+    if (customer_to_serve) {
         float service_time = generate_service_time();
         customer_to_serve->start_service_time = CURRENT_TIME;
         
-        // 1. Create Customer Service End Event [cite: 46]
         Event *cust_end_event = (Event*)malloc(sizeof(Event));
         cust_end_event->type = SERVICE_END;
         cust_end_event->time = CURRENT_TIME + service_time;
@@ -162,41 +252,79 @@ void handle_teller_action(Event *e) {
         cust_end_event->actor_data = customer_to_serve;
         insert_event_sorted(cust_end_event);
 
-        // 2. Create Teller Action Event (to look for next customer/idle) [cite: 47]
         Event *teller_next_event = (Event*)malloc(sizeof(Event));
         teller_next_event->type = TELLER_ACTION;
         teller_next_event->time = CURRENT_TIME + service_time;
         teller_next_event->action = handle_teller_action;
-        // The actor_data should link back to the specific teller (not implemented here)
-        teller_next_event->actor_data = e->actor_data; 
+        teller_next_event->actor_data = t;
         insert_event_sorted(teller_next_event);
 
-    } else { // No customers waiting at all [cite: 17, 44]
-        float idle_time_short = 1.0 + (float)rand() / RAND_MAX * (150.0 / 60.0 - 1.0); // 1-150 seconds [cite: 44]
+    } else {
+        float idle_time_minutes = (1.0 / 60.0) + (float)rand() / RAND_MAX * (MAX_TELLER_IDLE_MINUTES_SHORT - (1.0 / 60.0));
         
-        // Put a Teller Action event back into the queue for a random idle time [cite: 44]
         Event *idle_event = (Event*)malloc(sizeof(Event));
         idle_event->type = TELLER_ACTION;
-        idle_event->time = CURRENT_TIME + idle_time_short;
+        idle_event->time = CURRENT_TIME + idle_time_minutes;
         idle_event->action = handle_teller_action;
-        idle_event->actor_data = e->actor_data; 
+        idle_event->actor_data = t;
         insert_event_sorted(idle_event);
         
-        // ... update global teller idle time stats ...
+        printf("FP Log: Teller %d goes IDLE until %.2f\n", t->id, idle_event->time);
     }
 }
 
-
-// --- Simulation Main Loop ---
-void run_simulation(int num_customers, int num_tellers, float sim_time, float avg_service, int single_queue_mode) {
-    // ... Initialization of parameters and global statistics ...
-    srand(time(NULL)); // Initialize random seed
+void print_statistics(int single_queue_mode) {
+    if (customers_served == 0) {
+        printf("\nNo customers were served during the simulation time.\n");
+        return;
+    }
     
-    // 1. Instantiate all Customer Arrival events [cite: 31, 32, 77]
+    printf("\n--- Simulation Results (%s) ---\n", single_queue_mode ? "Single Queue" : "Separate Queues");
+    printf("Customers Served: %d\n", customers_served);
+    printf("Simulation End Time: %.2f minutes\n", CURRENT_TIME);
+    printf("--- Averages ---\n");
+    printf("Avg Wait Time: %.2f minutes\n", total_wait_time / customers_served);
+    printf("Avg Service Time: %.2f minutes\n", total_service_time / customers_served);
+    printf("Avg Time in Bank: %.2f minutes\n", total_time_in_bank / customers_served);
+    printf("\n--------------------------------------------\n");
+}
+
+void run_simulation(int num_customers, int num_tellers, float sim_time, float avg_service, int single_queue_mode) {
+    CURRENT_TIME = 0.0;
+    customers_served = 0;
+    total_wait_time = 0.0;
+    total_service_time = 0.0;
+    total_time_in_bank = 0.0;
+    single_queue_mode_flag = single_queue_mode;
+    
+    if (EventQueueHead != NULL) free_all_remaining_events();
+    if (Tellers != NULL) free(Tellers);
+    if (TellerLines != NULL) free_all_teller_queues();
+
+    Tellers = (Teller*)malloc(num_tellers * sizeof(Teller));
+    
+    int num_queues = single_queue_mode ? 1 : num_tellers;
+    TellerLines = (TellerQueue*)malloc(num_queues * sizeof(TellerQueue));
+    
+    for (int i = 0; i < num_tellers; i++) {
+        Tellers[i].id = i + 1;
+        
+        if (!single_queue_mode || i == 0) {
+            int q_index = single_queue_mode ? 0 : i;
+            TellerLines[q_index].id = i + 1;
+            TellerLines[q_index].head = NULL;
+            TellerLines[q_index].tail = NULL;
+            TellerLines[q_index].length = 0;
+        }
+    }
+    
     for (int i = 0; i < num_customers; i++) {
         Customer *c = (Customer*)malloc(sizeof(Customer));
         c->id = i + 1;
         c->arrival_time = generate_arrival_time();
+        c->start_service_time = 0.0;
+        c->departure_time = 0.0;
+        c->next = NULL;
         
         Event *e = (Event*)malloc(sizeof(Event));
         e->type = ARRIVAL;
@@ -206,45 +334,43 @@ void run_simulation(int num_customers, int num_tellers, float sim_time, float av
         insert_event_sorted(e);
     }
     
-    // 2. Instantiate all Teller (initial) events [cite: 25]
     for (int i = 0; i < num_tellers; i++) {
-        // ... Teller structure initialization ...
-        
         Event *e = (Event*)malloc(sizeof(Event));
         e->type = TELLER_ACTION;
-        e->time = 1.0 + (float)rand() / RAND_MAX * (MAX_TELLER_SECONDS_LONG / 60.0 - 1.0); // Random idle time 1-600s [cite: 25]
+        // CORRECTED LINE: Uses MAX_TELLER_IDLE_MINUTES_LONG
+        float initial_idle_time = (1.0 / 60.0) + (float)rand() / RAND_MAX * (MAX_TELLER_IDLE_MINUTES_LONG - (1.0 / 60.0));
+        e->time = initial_idle_time;
         e->action = handle_teller_action;
-        // The actor_data should link back to the specific teller (not implemented here)
-        e->actor_data = NULL; 
+        e->actor_data = &Tellers[i];
         insert_event_sorted(e);
     }
     
-    // 3. Play out the simulation [cite: 33]
+    printf("\nInitial events scheduled. Starting simulation...\n");
+    
     while (EventQueueHead != NULL) {
-        Event *current_event = remove_event_head(); // Take the first event [cite: 33]
+        Event *current_event = remove_event_head();
         
         if (current_event->time > SIM_TIME_MINUTES) {
-            // Stop if the event happens after the simulation time limit
-            // ... (Need to free remaining events/customers) ...
-            break;
+            free(current_event);
+            break; 
         }
 
-        CURRENT_TIME = current_event->time; // Advance the clock [cite: 33]
+        CURRENT_TIME = current_event->time;
         
-        // Invoke the action method associated with that event [cite: 33, 63]
         current_event->action(current_event); 
         
-        free(current_event); // Event object is deleted after action [cite: 42]
+        free(current_event);
     }
     
-    // 4. Print out the statistics [cite: 35]
-    // ... print_statistics(single_queue_mode) ...
+    free_all_remaining_events();
+    free_all_teller_queues();
+    
+    print_statistics(single_queue_mode);
 }
 
 int main(int argc, char *argv[]) {
-    // 1. Get and interpret program parameters [cite: 22, 66]
     if (argc != 5) {
-        fprintf(stderr, "Usage: %s #customers #tellers simulationTime averageServiceTime\n", argv[0]);
+        fprintf(stderr, "Usage: %s #customers #tellers simulationTime(min) averageServiceTime(min)\n", argv[0]);
         return 1;
     }
 
@@ -253,24 +379,31 @@ int main(int argc, char *argv[]) {
     SIM_TIME_MINUTES = atof(argv[3]);
     AVG_SERVICE_TIME_MINUTES = atof(argv[4]);
     
-    // Convert all constants to minutes for consistency (e.g., 600s/60 = 10 min)
+    if (NUM_CUSTOMERS <= 0 || NUM_TELLERS <= 0 || SIM_TIME_MINUTES <= 0.0 || AVG_SERVICE_TIME_MINUTES <= 0.0) {
+        fprintf(stderr, "All parameters must be positive.\n");
+        return 1;
+    }
+
+    srand(time(NULL));
     
     printf("--- Simulation Parameters ---\n");
     printf("Customers: %d, Tellers: %d, Time: %.1f min, Avg Service: %.1f min\n", 
            NUM_CUSTOMERS, NUM_TELLERS, SIM_TIME_MINUTES, AVG_SERVICE_TIME_MINUTES);
 
-    // 2. Run simulation for separate queues (as primary logic is here) [cite: 36]
     printf("\n============================================\n");
-    printf("    RUNNING SIMULATION: SEPARATE QUEUES\n");
+    printf("      RUNNING SIMULATION: SEPARATE QUEUES\n");
     printf("============================================\n");
     run_simulation(NUM_CUSTOMERS, NUM_TELLERS, SIM_TIME_MINUTES, AVG_SERVICE_TIME_MINUTES, 0);
     
-    // 3. Run simulation for single queue [cite: 36]
-    // ... Reset queues and statistics ...
-    // printf("\n============================================\n");
-    // printf("    RUNNING SIMULATION: SINGLE QUEUE\n");
-    // printf("============================================\n");
-    // run_simulation(NUM_CUSTOMERS, NUM_TELLERS, SIM_TIME_MINUTES, AVG_SERVICE_TIME_MINUTES, 1);
+    printf("\n============================================\n");
+    printf("        RUNNING SIMULATION: SINGLE QUEUE\n");
+    printf("============================================\n");
+    run_simulation(NUM_CUSTOMERS, NUM_TELLERS, SIM_TIME_MINUTES, AVG_SERVICE_TIME_MINUTES, 1);
+
+    if (Tellers != NULL) {
+        free(Tellers);
+        Tellers = NULL;
+    }
 
     return 0;
 }
